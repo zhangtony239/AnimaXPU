@@ -228,7 +228,7 @@ history = InMemoryHistory()
 completer = init_tags(hotwords=HOTWORDS)
 
 gen = torch.Generator(device="xpu")
-MAX_SEED = np.iinfo(np.int32).max
+MAX_SEED = np.iinfo("int32").max
 
 
 def encode_prompt(prompt_text: str, max_sequence_length: int = 512) -> torch.Tensor:
