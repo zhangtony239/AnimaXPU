@@ -8,6 +8,7 @@ OUTPUT_PATH = "C:\\Users\\Tony\\Downloads\\"
 HEIGHT = 1560
 WIDTH = 920
 CFG_SCALE = 4
+CFG_BATCH_SIZE = 2
 STEPS = 30
 NEGATIVE_PROMPT = "worst quality, low quality, score_1, score_2, score_3, artist name"
 HOTWORDS = {
@@ -300,6 +301,17 @@ def draw(
         if pad_w:
             padding_mask[:, :, :, WIDTH:] = 1.0
 
+        cfg_embeds: torch.Tensor | None = None
+        if negative_prompt_embeds is not None and CFG_BATCH_SIZE >= 2:
+            seq_diff = prompt_embeds.shape[1] - negative_prompt_embeds.shape[1]
+            if seq_diff > 0:
+                negative_prompt_embeds = F.pad(
+                    negative_prompt_embeds, (0, 0, 0, seq_diff)
+                )
+            elif seq_diff < 0:
+                prompt_embeds = F.pad(prompt_embeds, (0, 0, 0, -seq_diff))
+            cfg_embeds = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)
+
         # 3. 去噪循环
         for t in tqdm(timesteps, desc="Denoising"):
             latent_model_input = latents.to(torch.bfloat16)
@@ -310,14 +322,27 @@ def draw(
                 / scheduler.config["num_train_timesteps"]
             )
 
-            noise_pred_cond = dit(
-                hidden_states=latent_model_input,
-                timestep=timestep,
-                encoder_hidden_states=prompt_embeds,
-                padding_mask=padding_mask,
-                return_dict=False,
-            )[0]
-            if negative_prompt_embeds is not None:
+            if cfg_embeds is not None:
+                noise_pred_uncond, noise_pred_cond = dit(
+                    hidden_states=torch.cat(
+                        [latent_model_input, latent_model_input], dim=0
+                    ),
+                    timestep=timestep.expand(2),
+                    encoder_hidden_states=cfg_embeds,
+                    padding_mask=padding_mask,
+                    return_dict=False,
+                )[0].chunk(2)
+                noise_pred = noise_pred_uncond + guidance_scale * (
+                    noise_pred_cond - noise_pred_uncond
+                )
+            elif negative_prompt_embeds is not None:
+                noise_pred_cond = dit(
+                    hidden_states=latent_model_input,
+                    timestep=timestep,
+                    encoder_hidden_states=prompt_embeds,
+                    padding_mask=padding_mask,
+                    return_dict=False,
+                )[0]
                 noise_pred_uncond = dit(
                     hidden_states=latent_model_input,
                     timestep=timestep,
@@ -329,7 +354,13 @@ def draw(
                     noise_pred_cond - noise_pred_uncond
                 )
             else:
-                noise_pred = noise_pred_cond
+                noise_pred = dit(
+                    hidden_states=latent_model_input,
+                    timestep=timestep,
+                    encoder_hidden_states=prompt_embeds,
+                    padding_mask=padding_mask,
+                    return_dict=False,
+                )[0]
 
             if pad_h or pad_w:
                 noise_pred = noise_pred[:, :, :, :latent_h, :latent_w]
